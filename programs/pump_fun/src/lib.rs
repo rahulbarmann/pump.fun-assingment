@@ -254,14 +254,19 @@ pub struct Sell<'info> {
     pub seller: Signer<'info>,
     pub contract: Signer<'info>,
     #[account(mut)]
+    /// CHECK: This is a token account that we transfer from
     pub seller_token_account: AccountInfo<'info>,
     #[account(mut)]
+    /// CHECK: This is a token account that we transfer to
     pub contract_token_account: AccountInfo<'info>,
     #[account(mut)]
+    /// CHECK: This is the payment token account
     pub payment_token_account: AccountInfo<'info>,
     #[account(mut)]
+    /// CHECK: This is the seller's payment receiving account
     pub seller_payment_account: AccountInfo<'info>,
     #[account(mut)]
+    /// CHECK: This is the fee wallet token account
     pub fee_token_account: AccountInfo<'info>,
     pub token_program: Program<'info, Token>,
 }
@@ -289,10 +294,13 @@ pub struct Buy<'info> {
     pub state: Account<'info, PumpFunState>,
     pub buyer: Signer<'info>,
     #[account(mut)]
+    /// CHECK: This is a token account that we transfer from
     pub buyer_token_account: AccountInfo<'info>,
     #[account(mut)]
+    /// CHECK: This is a token account that we transfer to
     pub recipient_token_account: AccountInfo<'info>,
     #[account(mut)]
+    /// CHECK: This is the fee wallet token account
     pub fee_token_account: AccountInfo<'info>,
     pub token_program: Program<'info, Token>,
 }
