@@ -1,9 +1,8 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, Transfer, Mint, MintTo};
+use anchor_spl::token::{self, Token, Transfer};
 
 declare_id!("BDmyUtXfoCXubpBTscdVFRGrvu6RN6geGTSypRm4BbwQ");
 
-// Constants
 pub const DECIMALS: u8 = 9;
 pub const DECIMAL_MULTIPLIER: u64 = 1_000_000_000; // 10^9
 pub const INITIAL_MARKET_CAP: u64 = 42_000; // $42,000
@@ -47,7 +46,7 @@ pub mod pump_fun {
         let state = &mut ctx.accounts.state;
         
         // Calculate price using bonding curve
-        let price = calculate_price(state.circulating_supply, amount)?;
+        let price = calculate_price(state.circulating_supply)?;
         
         // Check price restrictions before graduation
         if !state.graduated {
@@ -68,7 +67,6 @@ pub mod pump_fun {
             .checked_div(100)
             .ok_or::<Error>(PumpFunError::ArithmeticError.into())?;
 
-        // Transfer main amount
         let transfer_amount = total_cost
             .checked_sub(fee_amount)
             .ok_or::<Error>(PumpFunError::ArithmeticError.into())?
@@ -147,16 +145,127 @@ pub mod pump_fun {
         Ok(())
     }
 
+    pub fn sell(ctx: Context<Sell>, amount: u64) -> Result<()> {
+        let state = &mut ctx.accounts.state;
+        
+        // Verify we have enough supply
+        require!(
+            state.circulating_supply >= amount,
+            PumpFunError::InsufficientSupply
+        );
+        
+        // Calculate price using bonding curve
+        let price = calculate_price(state.circulating_supply.checked_sub(amount)
+            .ok_or::<Error>(PumpFunError::ArithmeticError.into())?)?;
+        
+        // Calculate total payout and fees
+        let total_payout = price
+            .checked_mul(amount)
+            .ok_or::<Error>(PumpFunError::ArithmeticError.into())?;
+        
+        let fee_amount = total_payout
+            .checked_mul(FEE_PERCENTAGE as u64)
+            .ok_or::<Error>(PumpFunError::ArithmeticError.into())?
+            .checked_div(100)
+            .ok_or::<Error>(PumpFunError::ArithmeticError.into())?;
+
+        // Calculate net payout after fees
+        let net_payout = total_payout
+            .checked_sub(fee_amount)
+            .ok_or::<Error>(PumpFunError::ArithmeticError.into())?
+            .checked_mul(DECIMAL_MULTIPLIER)
+            .ok_or::<Error>(PumpFunError::ArithmeticError.into())?;
+
+        // Transfer tokens from seller to contract
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.seller_token_account.to_account_info(),
+                    to: ctx.accounts.contract_token_account.to_account_info(),
+                    authority: ctx.accounts.seller.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+
+        // Transfer payment to seller
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.payment_token_account.to_account_info(),
+                    to: ctx.accounts.seller_payment_account.to_account_info(),
+                    authority: ctx.accounts.contract.to_account_info(),
+                },
+            ),
+            net_payout,
+        )?;
+
+        // Transfer fee
+        token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.payment_token_account.to_account_info(),
+                    to: ctx.accounts.fee_token_account.to_account_info(),
+                    authority: ctx.accounts.contract.to_account_info(),
+                },
+            ),
+            fee_amount.checked_mul(DECIMAL_MULTIPLIER)
+                .ok_or::<Error>(PumpFunError::ArithmeticError.into())?,
+        )?;
+
+        // Update state
+        state.circulating_supply = state.circulating_supply
+            .checked_sub(amount)
+            .ok_or::<Error>(PumpFunError::ArithmeticError.into())?;
+        state.current_price = price;
+        state.market_cap = state.circulating_supply
+            .checked_mul(price)
+            .ok_or::<Error>(PumpFunError::ArithmeticError.into())?;
+
+        // Emit event for frontend tracking
+        emit!(TransactionEvent {
+            transaction_type: TransactionType::Sell,
+            amount,
+            price,
+            market_cap: state.market_cap,
+            timestamp: Clock::get()?.unix_timestamp,
+        });
+
+        Ok(())
+    }
+
     pub fn lock_lp_tokens(ctx: Context<LockLP>) -> Result<()> {
         let state = &mut ctx.accounts.state;
         require!(state.graduated, PumpFunError::NotGraduated);
         require!(!state.lp_tokens_locked, PumpFunError::LPAlreadyLocked);
         
-        // Implement LP token burning logic here
         state.lp_tokens_locked = true;
         Ok(())
     }
 }
+
+#[derive(Accounts)]
+pub struct Sell<'info> {
+    #[account(mut)]
+    pub state: Account<'info, PumpFunState>,
+    pub seller: Signer<'info>,
+    pub contract: Signer<'info>,
+    #[account(mut)]
+    pub seller_token_account: AccountInfo<'info>,
+    #[account(mut)]
+    pub contract_token_account: AccountInfo<'info>,
+    #[account(mut)]
+    pub payment_token_account: AccountInfo<'info>,
+    #[account(mut)]
+    pub seller_payment_account: AccountInfo<'info>,
+    #[account(mut)]
+    pub fee_token_account: AccountInfo<'info>,
+    pub token_program: Program<'info, Token>,
+}
+
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
@@ -180,13 +289,10 @@ pub struct Buy<'info> {
     pub state: Account<'info, PumpFunState>,
     pub buyer: Signer<'info>,
     #[account(mut)]
-    /// CHECK: This is a token account that we transfer from
     pub buyer_token_account: AccountInfo<'info>,
     #[account(mut)]
-    /// CHECK: This is a token account that we transfer to
     pub recipient_token_account: AccountInfo<'info>,
     #[account(mut)]
-    /// CHECK: This is the fee wallet token account
     pub fee_token_account: AccountInfo<'info>,
     pub token_program: Program<'info, Token>,
 }
@@ -222,6 +328,9 @@ pub enum PumpFunError {
     NotGraduated,
     #[msg("LP tokens are already locked")]
     LPAlreadyLocked,
+    #[msg("Insufficient supply for sell operation")]
+    InsufficientSupply,
+
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
@@ -240,7 +349,7 @@ pub struct TransactionEvent {
 }
 
 // Helper function for price calculation
-fn calculate_price(current_supply: u64, amount: u64) -> Result<u64> {
+fn calculate_price(current_supply: u64) -> Result<u64> {
     // Simple linear bonding curve: price increases linearly with supply
     let base_price = INITIAL_MARKET_CAP / TOTAL_SUPPLY;
     let supply_percentage = current_supply
